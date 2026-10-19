@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
+	"time"
 )
 
 type Account struct {
@@ -307,8 +309,80 @@ func (c *Client) Device(ctx context.Context, id, dev string) (*Device, error) {
 	return &d, c.do(ctx, "GET", net(id)+"/devices/"+dev, nil, &d)
 }
 
+// UpdateDevice applies nickname/paused/blacklisted changes and reads the device back to
+// confirm they took. The cloud API answers 200 to writes it silently drops: PUTs on the
+// 2.2 device endpoint (only 2.3 applies them) and blacklisted in the PUT body (blocking
+// is the form-encoded blacklist resource).
 func (c *Client) UpdateDevice(ctx context.Context, id, dev string, fields map[string]any) error {
-	return c.do(ctx, "PUT", net(id)+"/devices/"+dev, fields, nil)
+	put := make(map[string]any, len(fields))
+	for k, v := range fields {
+		var ok bool
+		switch k {
+		case "nickname":
+			_, ok = v.(string)
+			put[k] = v
+		case "paused":
+			_, ok = v.(bool)
+			put[k] = v
+		case "blacklisted":
+			_, ok = v.(bool)
+		default:
+			return fmt.Errorf("unsupported device field %q", k)
+		}
+		if !ok {
+			return fmt.Errorf("device field %q has the wrong type %T", k, v)
+		}
+	}
+	if len(put) > 0 {
+		if err := c.do(ctx, "PUT", "/2.3/"+net(id)+"/devices/"+dev, put, nil); err != nil {
+			return err
+		}
+	}
+	if on, ok := fields["blacklisted"].(bool); ok {
+		d, err := c.Device(ctx, id, dev)
+		if err != nil {
+			return err
+		}
+		if d.Blacklisted != on {
+			if on {
+				err = c.do(ctx, "POST", net(id)+"/blacklist", url.Values{"mac": {d.MAC}}, nil)
+			} else {
+				err = c.do(ctx, "DELETE", net(id)+"/blacklist/"+d.MAC, nil, nil)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return c.confirmDevice(ctx, id, dev, fields)
+}
+
+// confirmDevice polls the device until every field in want reads back, or fails.
+func (c *Client) confirmDevice(ctx context.Context, id, dev string, want map[string]any) error {
+	every := c.pollEvery
+	if every == 0 {
+		every = time.Second
+	}
+	var d *Device
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(every):
+			}
+		}
+		var err error
+		if d, err = c.Device(ctx, id, dev); err != nil {
+			return err
+		}
+		if (want["paused"] == nil || want["paused"] == d.Paused) &&
+			(want["blacklisted"] == nil || want["blacklisted"] == d.Blacklisted) &&
+			(want["nickname"] == nil || strings.TrimSpace(want["nickname"].(string)) == strings.TrimSpace(d.Nickname)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("eero accepted the change but %s still reads paused=%t blacklisted=%t nickname=%q (wanted %v)", dev, d.Paused, d.Blacklisted, d.Nickname, want)
 }
 
 func (c *Client) Eeros(ctx context.Context, id string) ([]Eero, error) {

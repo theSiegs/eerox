@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fake(t *testing.T, h http.HandlerFunc) *Client {
@@ -125,6 +126,8 @@ func TestNonJSONResponse(t *testing.T) {
 
 func TestDevicesAndMutations(t *testing.T) {
 	var put map[string]any
+	var blocked bool
+	var blockedMAC string
 	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/2.2/networks/9/devices" && r.Method == http.MethodGet:
@@ -132,7 +135,16 @@ func TestDevicesAndMutations(t *testing.T) {
 				{"url": "/2.2/networks/9/devices/a1", "mac": "aa:bb", "ip": "10.0.0.5", "hostname": "nas", "connected": true},
 				{"url": "/2.2/networks/9/devices/b2", "mac": "cc:dd", "ip": "10.0.0.6", "nickname": "Kids iPad", "connected": false},
 			})
-		case r.URL.Path == "/2.2/networks/9/devices/b2" && r.Method == http.MethodPut:
+		case r.URL.Path == "/2.2/networks/9/devices/b2" && r.Method == http.MethodGet:
+			ok(w, map[string]any{"url": "/2.2/networks/9/devices/b2", "mac": "cc:dd", "paused": put["paused"] == true, "blacklisted": blocked})
+		case r.URL.Path == "/2.2/networks/9/blacklist" && r.Method == http.MethodPost:
+			_ = r.ParseForm()
+			blocked, blockedMAC = true, r.PostForm.Get("mac")
+			ok(w, nil)
+		case r.URL.Path == "/2.2/networks/9/blacklist/cc:dd" && r.Method == http.MethodDelete:
+			blocked = false
+			ok(w, nil)
+		case r.URL.Path == "/2.3/networks/9/devices/b2" && r.Method == http.MethodPut:
 			_ = json.NewDecoder(r.Body).Decode(&put)
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9/reservations" && r.Method == http.MethodPost:
@@ -156,6 +168,12 @@ func TestDevicesAndMutations(t *testing.T) {
 	if err := c.UpdateDevice(ctx, "9", "b2", map[string]any{"paused": true}); err != nil || put["paused"] != true {
 		t.Fatalf("update %v %v", err, put)
 	}
+	if err := c.UpdateDevice(ctx, "9", "b2", map[string]any{"blacklisted": true}); err != nil || !blocked || blockedMAC != "cc:dd" {
+		t.Fatalf("block %v %v %q", err, blocked, blockedMAC)
+	}
+	if err := c.UpdateDevice(ctx, "9", "b2", map[string]any{"blacklisted": false}); err != nil || blocked {
+		t.Fatalf("unblock %v %v", err, blocked)
+	}
 	r, err := c.AddReservation(ctx, "9", "10.0.0.7", "AA:BB:CC:DD:EE:FF", "printer")
 	if err != nil || r.ID() != "77" || r.MAC != "aa:bb:cc:dd:ee:ff" {
 		t.Fatalf("reservation %v %+v", err, r)
@@ -163,6 +181,30 @@ func TestDevicesAndMutations(t *testing.T) {
 	st, err := c.SpeedTest(ctx, "9")
 	if err != nil || st.Down.Value != 900 {
 		t.Fatalf("speedtest %v %+v", err, st)
+	}
+}
+
+func TestUpdateDeviceReportsDroppedWrite(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/2.3/networks/9/devices/b2" && r.Method == http.MethodPut:
+			ok(w, nil) // accepted, never applied
+		case r.URL.Path == "/2.2/networks/9/devices/b2" && r.Method == http.MethodGet:
+			ok(w, map[string]any{"url": "/2.2/networks/9/devices/b2", "mac": "cc:dd", "nickname": "Kids iPad"})
+		default:
+			fail(w, 404, "nope")
+		}
+	})
+	c.pollEvery = time.Millisecond
+	err := c.UpdateDevice(context.Background(), "9", "b2", map[string]any{"paused": true})
+	if err == nil || !strings.Contains(err.Error(), "still reads paused=false") {
+		t.Fatalf("dropped write not reported: %v", err)
+	}
+	if err := c.UpdateDevice(context.Background(), "9", "b2", map[string]any{"color": "red"}); err == nil {
+		t.Fatal("unknown field must be rejected")
+	}
+	if err := c.UpdateDevice(context.Background(), "9", "b2", map[string]any{"paused": "yes"}); err == nil {
+		t.Fatal("wrong type must be rejected")
 	}
 }
 
