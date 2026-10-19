@@ -359,11 +359,28 @@ func (c *Client) UpdateDevice(ctx context.Context, id, dev string, fields map[st
 
 // confirmDevice polls the device until every field in want reads back, or fails.
 func (c *Client) confirmDevice(ctx context.Context, id, dev string, want map[string]any) error {
+	return c.confirm(ctx, func() (string, error) {
+		d, err := c.Device(ctx, id, dev)
+		if err != nil {
+			return "", err
+		}
+		if (want["paused"] == nil || want["paused"] == d.Paused) &&
+			(want["blacklisted"] == nil || want["blacklisted"] == d.Blacklisted) &&
+			(want["nickname"] == nil || strings.TrimSpace(want["nickname"].(string)) == strings.TrimSpace(d.Nickname)) {
+			return "", nil
+		}
+		return fmt.Sprintf("%s still reads paused=%t blacklisted=%t nickname=%q (wanted %v)", dev, d.Paused, d.Blacklisted, d.Nickname, want), nil
+	})
+}
+
+// confirm runs check until it reports no mismatch, up to 5 reads. The cloud API answers 200 to
+// writes it drops, so a write is only trusted once it reads back.
+func (c *Client) confirm(ctx context.Context, check func() (mismatch string, err error)) error {
 	every := c.pollEvery
 	if every == 0 {
 		every = time.Second
 	}
-	var d *Device
+	var mismatch string
 	for i := 0; i < 5; i++ {
 		if i > 0 {
 			select {
@@ -373,16 +390,11 @@ func (c *Client) confirmDevice(ctx context.Context, id, dev string, want map[str
 			}
 		}
 		var err error
-		if d, err = c.Device(ctx, id, dev); err != nil {
+		if mismatch, err = check(); err != nil || mismatch == "" {
 			return err
 		}
-		if (want["paused"] == nil || want["paused"] == d.Paused) &&
-			(want["blacklisted"] == nil || want["blacklisted"] == d.Blacklisted) &&
-			(want["nickname"] == nil || strings.TrimSpace(want["nickname"].(string)) == strings.TrimSpace(d.Nickname)) {
-			return nil
-		}
 	}
-	return fmt.Errorf("eero accepted the change but %s still reads paused=%t blacklisted=%t nickname=%q (wanted %v)", dev, d.Paused, d.Blacklisted, d.Nickname, want)
+	return fmt.Errorf("eero accepted the change but %s", mismatch)
 }
 
 func (c *Client) Eeros(ctx context.Context, id string) ([]Eero, error) {
@@ -403,8 +415,51 @@ func (c *Client) Profiles(ctx context.Context, id string) ([]Profile, error) {
 	return p, c.do(ctx, "GET", net(id)+"/profiles", nil, &p)
 }
 
+func (c *Client) Profile(ctx context.Context, id, prof string) (*Profile, error) {
+	var p Profile
+	return &p, c.do(ctx, "GET", net(id)+"/profiles/"+prof, nil, &p)
+}
+
+// UpdateProfile applies paused/devices changes and reads the profile back to confirm they took.
 func (c *Client) UpdateProfile(ctx context.Context, id, prof string, fields map[string]any) error {
-	return c.do(ctx, "PUT", net(id)+"/profiles/"+prof, fields, nil)
+	paused, hasPaused := fields["paused"].(bool)
+	devs, hasDevices := fields["devices"].([]map[string]string)
+	for k := range fields {
+		if (k != "paused" || !hasPaused) && (k != "devices" || !hasDevices) {
+			return fmt.Errorf("unsupported profile field %q", k)
+		}
+	}
+	if err := c.do(ctx, "PUT", net(id)+"/profiles/"+prof, fields, nil); err != nil {
+		return err
+	}
+	return c.confirm(ctx, func() (string, error) {
+		p, err := c.Profile(ctx, id, prof)
+		if err != nil {
+			return "", err
+		}
+		if hasPaused && p.Paused != paused {
+			return fmt.Sprintf("profile %s still reads paused=%t (wanted %t)", prof, p.Paused, paused), nil
+		}
+		if hasDevices {
+			have := map[string]bool{}
+			for _, u := range p.DeviceURLs() {
+				have[ID(u)] = true
+			}
+			want := map[string]bool{}
+			for _, d := range devs {
+				want[ID(d["url"])] = true
+			}
+			if len(have) != len(want) {
+				return fmt.Sprintf("profile %s still has %d devices (wanted %d)", prof, len(have), len(want)), nil
+			}
+			for u := range want {
+				if !have[u] {
+					return fmt.Sprintf("profile %s is missing device %s", prof, u), nil
+				}
+			}
+		}
+		return "", nil
+	})
 }
 
 func (c *Client) Reservations(ctx context.Context, id string) ([]Reservation, error) {

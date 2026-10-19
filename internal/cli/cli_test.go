@@ -35,6 +35,7 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 	for k, v := range devices[1] {
 		b2[k] = v
 	}
+	p1 := map[string]any{"url": "/2.2/networks/9/profiles/p1", "name": "Kids", "paused": false, "devices": []map[string]any{{"url": "/2.2/networks/9/devices/a1"}}}
 	netWpa3 := false
 	_ = netWpa3
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,9 +74,16 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 			ok(w, []map[string]any{{"url": "/2.2/eeros/e1", "location": "Office", "gateway": true, "model": "Pro 6E", "ip_address": "10.0.0.1", "status": "green", "mesh_quality_bars": 5}})
 		case r.URL.Path == "/2.2/networks/9/profiles":
 			ok(w, []map[string]any{{"url": "/2.2/networks/9/profiles/p1", "name": "Kids", "paused": false, "devices": []map[string]any{{"url": "/2.2/networks/9/devices/a1"}}}})
+		case r.URL.Path == "/2.2/networks/9/profiles/p1" && r.Method == http.MethodGet:
+			ok(w, p1)
 		case r.URL.Path == "/2.2/networks/9/profiles/p1" && r.Method == http.MethodPut:
 			b, _ := io.ReadAll(r.Body)
 			puts = append(puts, "profile:"+string(b))
+			var in map[string]any
+			_ = json.Unmarshal(b, &in)
+			for k, v := range in {
+				p1[k] = v
+			}
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9/reservations":
 			ok(w, []map[string]any{{"url": "/2.2/networks/9/reservations/r1", "ip": "10.0.0.5", "mac": "aa:bb", "description": "nas"}})

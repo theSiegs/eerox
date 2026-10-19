@@ -13,6 +13,8 @@ All notable changes are documented here. The format follows
   resource, not a `blacklisted` field on the device.
 - Device writes now read the device back and fail with an error if the change did not apply, instead of
   printing `ok`.
+- `profile pause`/`unpause`/`assign`/`unassign` now read the profile back and fail if the change did not
+  apply, sharing the same check as device writes.
 - Tests no longer deadlock on Windows (completion output filled the stdout pipe) and skip the Unix
   file-mode assertion there.
 

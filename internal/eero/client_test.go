@@ -208,6 +208,39 @@ func TestUpdateDeviceReportsDroppedWrite(t *testing.T) {
 	}
 }
 
+func TestUpdateProfileReadsBack(t *testing.T) {
+	applied := true
+	var paused bool
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/2.2/networks/9/profiles/p1" && r.Method == http.MethodPut:
+			if applied {
+				var in map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&in)
+				paused, _ = in["paused"].(bool)
+			}
+			ok(w, nil)
+		case r.URL.Path == "/2.2/networks/9/profiles/p1" && r.Method == http.MethodGet:
+			ok(w, map[string]any{"url": "/2.2/networks/9/profiles/p1", "name": "Kids", "paused": paused})
+		default:
+			fail(w, 404, "nope")
+		}
+	})
+	c.pollEvery = time.Millisecond
+	ctx := context.Background()
+	if err := c.UpdateProfile(ctx, "9", "p1", map[string]any{"paused": true}); err != nil || !paused {
+		t.Fatalf("pause %v %v", err, paused)
+	}
+	applied = false
+	err := c.UpdateProfile(ctx, "9", "p1", map[string]any{"paused": false})
+	if err == nil || !strings.Contains(err.Error(), "still reads paused=true") {
+		t.Fatalf("dropped profile write not reported: %v", err)
+	}
+	if err := c.UpdateProfile(ctx, "9", "p1", map[string]any{"name": "x"}); err == nil {
+		t.Fatal("unknown field must be rejected")
+	}
+}
+
 func TestFindDevice(t *testing.T) {
 	devs := []Device{
 		{URL: "/x/devices/1", MAC: "aa:bb", IP: "10.0.0.1", Hostname: "office-mac"},
@@ -295,7 +328,6 @@ func TestReadEndpointsAndActions(t *testing.T) {
 	for _, fn := range []func() error{
 		func() error { return c.RebootEero(ctx, "e1") },
 		func() error { return c.RebootNetwork(ctx, "9") },
-		func() error { return c.UpdateProfile(ctx, "9", "p1", map[string]any{"paused": true}) },
 		func() error { return c.DeleteReservation(ctx, "9", "r1") },
 		func() error { return c.UpdateGuestNetwork(ctx, "9", map[string]any{"enabled": false}) },
 		func() error { return c.Logout(ctx) },
@@ -304,7 +336,7 @@ func TestReadEndpointsAndActions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want := []string{"POST /2.2/eeros/e1/reboot", "POST /2.2/networks/9/reboot", "PUT /2.2/networks/9/profiles/p1", "DELETE /2.2/networks/9/reservations/r1", "PUT /2.2/networks/9/guestnetwork", "POST /2.2/logout"}
+	want := []string{"POST /2.2/eeros/e1/reboot", "POST /2.2/networks/9/reboot", "DELETE /2.2/networks/9/reservations/r1", "PUT /2.2/networks/9/guestnetwork", "POST /2.2/logout"}
 	got := strings.Join(hits, "\n")
 	for _, w := range want {
 		if !strings.Contains(got, w) {
