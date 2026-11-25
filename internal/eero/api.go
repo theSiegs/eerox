@@ -496,17 +496,23 @@ func (c *Client) UpdateNetwork(ctx context.Context, id string, fields map[string
 	return c.do(ctx, "PUT", net(id), fields, nil)
 }
 
-// SetDNS replaces the network DNS mode and, for custom mode, the resolver IPs.
+// SetDNS replaces the network's IPv4 DNS mode and, for custom mode, the resolver IPs.
 // mode is "automatic" (use the ISP/eero resolvers) or "custom".
+//
+// The write is a PUT to networks/{id}/settings with the DNS object nested under "dns";
+// there is no networks/{id}/dns endpoint (it answers 404). The API accepts unknown keys
+// with 200 and drops them, so callers should read the network back to confirm. A DNS
+// change reboots every eero in the mesh a few minutes after the call returns, so only
+// call this when the setting actually differs.
 func (c *Client) SetDNS(ctx context.Context, id, mode string, ips []string) error {
-	body := map[string]any{"mode": mode}
+	dns := map[string]any{"mode": mode}
 	if mode == "custom" {
 		if ips == nil {
 			ips = []string{}
 		}
-		body["custom"] = map[string]any{"ips": ips}
+		dns["custom"] = map[string]any{"ips": ips}
 	}
-	return c.do(ctx, "PUT", net(id)+"/dns", body, nil)
+	return c.do(ctx, "PUT", net(id)+"/settings", map[string]any{"dns": dns}, nil)
 }
 
 // SpeedTest runs a speed test from the gateway. It blocks for the test duration (~30s).

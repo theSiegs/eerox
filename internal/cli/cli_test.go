@@ -38,6 +38,7 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 	p1 := map[string]any{"url": "/2.2/networks/9/profiles/p1", "name": "Kids", "paused": false, "devices": []map[string]any{{"url": "/2.2/networks/9/devices/a1"}}}
 	netWpa3 := false
 	_ = netWpa3
+	netDNS := map[string]any{"mode": "custom", "caching": true, "custom": map[string]any{"ips": []string{"10.0.0.2", "1.1.1.1"}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/2.2/account":
@@ -47,7 +48,7 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 			puts = append(puts, "netset:"+string(b))
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9":
-			ok(w, map[string]any{"url": "/2.2/networks/9", "name": "Home", "wan_ip": "1.2.3.4", "wpa3": netWpa3, "sqm": false, "band_steering": true, "upnp": false, "ipv6_upstream": false, "health": map[string]any{"internet": map[string]any{"status": "connected", "isp_up": true}, "eero_network": map[string]any{"status": "connected"}}, "eeros": map[string]any{"count": 2}, "dns": map[string]any{"mode": "custom", "caching": true, "custom": map[string]any{"ips": []string{"10.0.0.2", "1.1.1.1"}}}})
+			ok(w, map[string]any{"url": "/2.2/networks/9", "name": "Home", "wan_ip": "1.2.3.4", "wpa3": netWpa3, "sqm": false, "band_steering": true, "upnp": false, "ipv6_upstream": false, "health": map[string]any{"internet": map[string]any{"status": "connected", "isp_up": true}, "eero_network": map[string]any{"status": "connected"}}, "eeros": map[string]any{"count": 2}, "dns": netDNS})
 		case r.URL.Path == "/2.2/networks/9/devices":
 			ok(w, devices)
 		case r.URL.Path == "/2.2/networks/9/devices/b2" && r.Method == http.MethodGet:
@@ -98,9 +99,17 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 				puts = append(puts, "guest:"+string(b))
 			}
 			ok(w, map[string]any{"name": "Guests", "enabled": true, "password": "pw"})
-		case r.URL.Path == "/2.2/networks/9/dns" && r.Method == http.MethodPut:
+		case r.URL.Path == "/2.2/networks/9/settings" && r.Method == http.MethodPut:
+			// Like the real API: DNS lives under "dns" here; other keys are accepted and dropped.
 			b, _ := io.ReadAll(r.Body)
-			puts = append(puts, "dns:"+string(b))
+			puts = append(puts, "settings:"+string(b))
+			var in struct {
+				DNS map[string]any `json:"dns"`
+			}
+			_ = json.Unmarshal(b, &in)
+			if in.DNS != nil {
+				netDNS = map[string]any{"mode": in.DNS["mode"], "caching": netDNS["caching"], "custom": in.DNS["custom"]}
+			}
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9/speedtest":
 			ok(w, map[string]any{"up": map[string]any{"value": 40, "units": "Mbps"}, "down": map[string]any{"value": 900, "units": "Mbps"}})
@@ -278,15 +287,36 @@ func TestDNSAndDoctor(t *testing.T) {
 	if _, err := run(t, "dns", "--set", "10.0.0.2"); err == nil {
 		t.Fatal("dns --set must require --yes")
 	}
+	for _, bad := range [][]string{
+		{"dns", "--set", "not-an-ip", "--yes"},
+		{"dns", "--set", "2606:4700::1111", "--yes"},
+		{"dns", "--set", "10.0.0.2,10.0.0.3,10.0.0.4", "--yes"},
+		{"dns", "--set", "10.0.0.2,10.0.0.2", "--yes"},
+		{"dns", "--set", "10.0.0.2", "--auto", "--yes"},
+	} {
+		if _, err := run(t, bad...); err == nil {
+			t.Fatalf("%v must be rejected", bad)
+		}
+	}
+	if len(*puts) != 0 {
+		t.Fatalf("rejected input must not write: %v", *puts)
+	}
 	out, err = run(t, "dns", "--set", "10.0.0.2", "--yes")
-	if err != nil || !strings.Contains(out, "dns updated") {
+	if err != nil || !strings.Contains(out, "dns updated") || !strings.Contains(out, "resolvers  10.0.0.2") {
 		t.Fatalf("dns set %v\n%s", err, out)
+	}
+	// Same setting again: no write (every DNS write reboots the mesh), and no --yes needed.
+	out, err = run(t, "dns", "--set", "10.0.0.2")
+	if err != nil || !strings.Contains(out, "already set") {
+		t.Fatalf("dns no-op %v\n%s", err, out)
 	}
 	if _, err := run(t, "dns", "--auto", "--yes"); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(*puts, "\n")
-	if !strings.Contains(joined, `dns:{"custom":{"ips":["10.0.0.2"]},"mode":"custom"}`) || !strings.Contains(joined, `"mode":"automatic"`) {
+	if len(*puts) != 2 ||
+		!strings.Contains(joined, `settings:{"dns":{"custom":{"ips":["10.0.0.2"]},"mode":"custom"}}`) ||
+		!strings.Contains(joined, `settings:{"dns":{"mode":"automatic"}}`) {
 		t.Fatalf("dns puts:\n%s", joined)
 	}
 	out, err = run(t, "doctor")
