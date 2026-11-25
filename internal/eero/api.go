@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -491,9 +492,116 @@ func (c *Client) UpdateGuestNetwork(ctx context.Context, id string, fields map[s
 	return c.do(ctx, "PUT", net(id)+"/guestnetwork", fields, nil)
 }
 
-// UpdateNetwork PUTs top-level network settings, e.g. {"sqm": true, "wpa3": true}.
-func (c *Client) UpdateNetwork(ctx context.Context, id string, fields map[string]any) error {
-	return c.do(ctx, "PUT", net(id), fields, nil)
+// Thread is the network's Thread border-router state. Only non-secret fields are decoded:
+// the endpoint also returns the network key and operational dataset.
+type Thread struct {
+	Enabled bool   `json:"enabled"`
+	Name    string `json:"name"`
+	Channel int    `json:"channel"`
+}
+
+// Thread reads the network's Thread state.
+func (c *Client) Thread(ctx context.Context, id string) (*Thread, error) {
+	var t Thread
+	return &t, c.do(ctx, "GET", net(id)+"/thread", nil, &t)
+}
+
+// NetworkToggles are the on/off network features SetNetworkToggles can change.
+// A nil field is left as it is.
+type NetworkToggles struct {
+	WPA3, SQM, BandSteering, UPnP, IPv6, Thread *bool
+}
+
+// SetNetworkToggles applies the requested toggles and reads them back, returning the names
+// of the ones it changed. Toggles that already match are not written: settings writes can
+// reboot every eero in the mesh (confirmed for DNS on the same endpoint), so a no-op write
+// is not harmless.
+//
+// Wire formats (the network resource itself accepts these keys with 200 and drops them):
+//   - wpa3, band_steering, upnp, ipv6: PUT networks/{id}/settings with a JSON body;
+//     ipv6 sets ipv6_upstream and ipv6_downstream together, as the eero app does
+//   - sqm: PUT networks/{id}/settings?sqm=true|false (a query parameter, not a body field)
+//   - thread: PUT networks/{id}/thread {"thread_enable": bool}; read back as "enabled"
+func (c *Client) SetNetworkToggles(ctx context.Context, id string, t NetworkToggles) ([]string, error) {
+	n, err := c.Network(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var th *Thread
+	if t.Thread != nil {
+		if th, err = c.Thread(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	type toggle struct {
+		name string
+		want *bool
+		have func(*Network, *Thread) bool
+	}
+	all := []toggle{
+		{"wpa3", t.WPA3, func(n *Network, _ *Thread) bool { return n.Wpa3 }},
+		{"band_steering", t.BandSteering, func(n *Network, _ *Thread) bool { return n.BandSteering }},
+		{"upnp", t.UPnP, func(n *Network, _ *Thread) bool { return n.Upnp }},
+		{"ipv6", t.IPv6, func(n *Network, _ *Thread) bool { return n.IPv6Upstream }},
+		{"sqm", t.SQM, func(n *Network, _ *Thread) bool { return n.SQM }},
+		{"thread", t.Thread, func(_ *Network, th *Thread) bool { return th.Enabled }},
+	}
+	var changed []toggle
+	for _, tg := range all {
+		if tg.want != nil && tg.have(n, th) != *tg.want {
+			changed = append(changed, tg)
+		}
+	}
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	body := map[string]any{}
+	for _, tg := range changed {
+		v := *tg.want
+		switch tg.name {
+		case "wpa3", "band_steering", "upnp":
+			body[tg.name] = v
+		case "ipv6":
+			body["ipv6_upstream"], body["ipv6_downstream"] = v, v
+		}
+	}
+	if len(body) > 0 {
+		if err := c.do(ctx, "PUT", net(id)+"/settings", body, nil); err != nil {
+			return nil, err
+		}
+	}
+	names := make([]string, 0, len(changed))
+	for _, tg := range changed {
+		switch tg.name {
+		case "sqm":
+			if err := c.do(ctx, "PUT", net(id)+"/settings?sqm="+strconv.FormatBool(*tg.want), nil, nil); err != nil {
+				return names, err
+			}
+		case "thread":
+			if err := c.do(ctx, "PUT", net(id)+"/thread", map[string]any{"thread_enable": *tg.want}, nil); err != nil {
+				return names, err
+			}
+		}
+		names = append(names, tg.name)
+	}
+	return names, c.confirm(ctx, func() (string, error) {
+		n, err := c.Network(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		var th *Thread
+		if t.Thread != nil {
+			if th, err = c.Thread(ctx, id); err != nil {
+				return "", err
+			}
+		}
+		for _, tg := range changed {
+			if tg.have(n, th) != *tg.want {
+				return fmt.Sprintf("%s still reads %v", tg.name, !*tg.want), nil
+			}
+		}
+		return "", nil
+	})
 }
 
 // SetDNS replaces the network's IPv4 DNS mode and, for custom mode, the resolver IPs.

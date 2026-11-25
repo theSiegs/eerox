@@ -61,7 +61,8 @@ type setNetworkIn struct {
 	SQM          *bool `json:"sqm,omitempty" jsonschema:"smart queue management (bufferbloat control)"`
 	BandSteering *bool `json:"band_steering,omitempty"`
 	Upnp         *bool `json:"upnp,omitempty"`
-	IPv6         *bool `json:"ipv6,omitempty" jsonschema:"IPv6 upstream"`
+	IPv6         *bool `json:"ipv6,omitempty" jsonschema:"IPv6 (upstream and downstream together)"`
+	Thread       *bool `json:"thread,omitempty" jsonschema:"Thread border router"`
 }
 type assignIn struct {
 	Profile string `json:"profile" jsonschema:"profile name or id"`
@@ -300,22 +301,16 @@ func mcpServer(c *eero.Client, network func(context.Context) (string, error)) *m
 			return nil, st, err
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "eero_set_network", Description: "Toggle network features: wpa3, sqm, band_steering, upnp, ipv6. Returns the resulting state. Disruptive: confirm with the user first."},
+	mcp.AddTool(s, &mcp.Tool{Name: "eero_set_network", Description: "Toggle network features: wpa3, sqm, band_steering, upnp, ipv6, thread. Only settings that differ are written, and each is read back. Returns the resulting network state. Disruptive: settings changes may reboot every eero a few minutes later; confirm with the user first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in setNetworkIn) (*mcp.CallToolResult, *eero.Network, error) {
 			id, err := network(ctx)
 			if err != nil {
 				return nil, nil, err
 			}
-			fields := map[string]any{}
-			for k, v := range map[string]*bool{"wpa3": in.Wpa3, "sqm": in.SQM, "band_steering": in.BandSteering, "upnp": in.Upnp, "ipv6_upstream": in.IPv6} {
-				if v != nil {
-					fields[k] = *v
-				}
-			}
-			if len(fields) > 0 {
-				if err := c.UpdateNetwork(ctx, id, fields); err != nil {
-					return nil, nil, err
-				}
+			if _, err := c.SetNetworkToggles(ctx, id, eero.NetworkToggles{
+				WPA3: in.Wpa3, SQM: in.SQM, BandSteering: in.BandSteering, UPnP: in.Upnp, IPv6: in.IPv6, Thread: in.Thread,
+			}); err != nil {
+				return nil, nil, err
 			}
 			n, err := c.Network(ctx, id)
 			return nil, n, err

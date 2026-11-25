@@ -36,19 +36,35 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 		b2[k] = v
 	}
 	p1 := map[string]any{"url": "/2.2/networks/9/profiles/p1", "name": "Kids", "paused": false, "devices": []map[string]any{{"url": "/2.2/networks/9/devices/a1"}}}
-	netWpa3 := false
-	_ = netWpa3
-	netDNS := map[string]any{"mode": "custom", "caching": true, "custom": map[string]any{"ips": []string{"10.0.0.2", "1.1.1.1"}}}
+	netState := map[string]any{"wpa3": false, "sqm": false, "band_steering": true, "upnp": false, "ipv6_upstream": false, "ipv6_downstream": false}
+	threadOn := false
+	netDNS :=map[string]any{"mode": "custom", "caching": true, "custom": map[string]any{"ips": []string{"10.0.0.2", "1.1.1.1"}}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/2.2/account":
 			ok(w, map[string]any{"name": "L", "networks": map[string]any{"count": 1, "data": []map[string]any{{"url": "/2.2/networks/9", "name": "Home"}}}})
 		case r.URL.Path == "/2.2/networks/9" && r.Method == http.MethodPut:
+			// Like the real API: 200, but nothing applies. Writes must go to /settings.
 			b, _ := io.ReadAll(r.Body)
-			puts = append(puts, "netset:"+string(b))
+			puts = append(puts, "netroot:"+string(b))
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9":
-			ok(w, map[string]any{"url": "/2.2/networks/9", "name": "Home", "wan_ip": "1.2.3.4", "wpa3": netWpa3, "sqm": false, "band_steering": true, "upnp": false, "ipv6_upstream": false, "health": map[string]any{"internet": map[string]any{"status": "connected", "isp_up": true}, "eero_network": map[string]any{"status": "connected"}}, "eeros": map[string]any{"count": 2}, "dns": netDNS})
+			net := map[string]any{"url": "/2.2/networks/9", "name": "Home", "wan_ip": "1.2.3.4", "health": map[string]any{"internet": map[string]any{"status": "connected", "isp_up": true}, "eero_network": map[string]any{"status": "connected"}}, "eeros": map[string]any{"count": 2}, "dns": netDNS}
+			for k, v := range netState {
+				net[k] = v
+			}
+			ok(w, net)
+		case r.URL.Path == "/2.2/networks/9/thread" && r.Method == http.MethodPut:
+			b, _ := io.ReadAll(r.Body)
+			puts = append(puts, "thread:"+string(b))
+			var in map[string]any
+			_ = json.Unmarshal(b, &in)
+			if v, has := in["thread_enable"].(bool); has {
+				threadOn = v
+			}
+			ok(w, nil)
+		case r.URL.Path == "/2.2/networks/9/thread":
+			ok(w, map[string]any{"enabled": threadOn, "name": "eero-thread-x", "channel": 25, "master_key": "secret"})
 		case r.URL.Path == "/2.2/networks/9/devices":
 			ok(w, devices)
 		case r.URL.Path == "/2.2/networks/9/devices/b2" && r.Method == http.MethodGet:
@@ -100,15 +116,26 @@ func setup(t *testing.T) (*httptest.Server, *[]string) {
 			}
 			ok(w, map[string]any{"name": "Guests", "enabled": true, "password": "pw"})
 		case r.URL.Path == "/2.2/networks/9/settings" && r.Method == http.MethodPut:
-			// Like the real API: DNS lives under "dns" here; other keys are accepted and dropped.
+			// Like the real API: DNS lives under "dns", toggles are top-level keys, and sqm is a
+			// query parameter; anything else is accepted and dropped.
 			b, _ := io.ReadAll(r.Body)
-			puts = append(puts, "settings:"+string(b))
-			var in struct {
-				DNS map[string]any `json:"dns"`
+			entry := "settings:" + string(b)
+			if q := r.URL.RawQuery; q != "" {
+				entry = "settings?" + q + ":" + string(b)
 			}
+			puts = append(puts, entry)
+			var in map[string]any
 			_ = json.Unmarshal(b, &in)
-			if in.DNS != nil {
-				netDNS = map[string]any{"mode": in.DNS["mode"], "caching": netDNS["caching"], "custom": in.DNS["custom"]}
+			if d, has := in["dns"].(map[string]any); has {
+				netDNS = map[string]any{"mode": d["mode"], "caching": netDNS["caching"], "custom": d["custom"]}
+			}
+			for _, k := range []string{"wpa3", "band_steering", "upnp", "ipv6_upstream", "ipv6_downstream"} {
+				if v, has := in[k].(bool); has {
+					netState[k] = v
+				}
+			}
+			if s := r.URL.Query().Get("sqm"); s != "" {
+				netState["sqm"] = s == "true"
 			}
 			ok(w, nil)
 		case r.URL.Path == "/2.2/networks/9/speedtest":
@@ -343,16 +370,28 @@ func TestSetNetwork(t *testing.T) {
 	if _, err := run(t, "set", "--wpa3", "bogus", "--yes"); err == nil {
 		t.Fatal("invalid on|off must error")
 	}
-	out, err = run(t, "set", "--wpa3", "on", "--sqm", "on", "--yes")
-	if err != nil || !strings.Contains(out, "updated 2 setting(s)") {
+	// band_steering is already on, so only wpa3, sqm, ipv6 and thread are written.
+	out, err = run(t, "set", "--wpa3", "on", "--sqm", "on", "--band-steering", "on", "--ipv6", "on", "--thread", "on", "--yes")
+	if err != nil || !strings.Contains(out, "updated 4 setting(s)") ||
+		!strings.Contains(out, "wpa3           on") || !strings.Contains(out, "sqm            on") ||
+		!strings.Contains(out, "ipv6_upstream  on") || !strings.Contains(out, "thread         on") {
 		t.Fatalf("set %v\n%s", err, out)
 	}
-	joined := strings.Join(*puts, "\n")
-	if !strings.Contains(joined, `"wpa3":true`) || !strings.Contains(joined, `"sqm":true`) {
-		t.Fatalf("netset put:\n%s", joined)
+	want := []string{
+		`settings:{"ipv6_downstream":true,"ipv6_upstream":true,"wpa3":true}`,
+		`settings?sqm=true:`,
+		`thread:{"thread_enable":true}`,
+	}
+	if strings.Join(*puts, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("set puts:\n%s\nwant:\n%s", strings.Join(*puts, "\n"), strings.Join(want, "\n"))
+	}
+	// Everything already matches: no writes at all.
+	out, err = run(t, "set", "--wpa3", "on", "--thread", "on", "--yes")
+	if err != nil || !strings.Contains(out, "nothing changed") || len(*puts) != 3 {
+		t.Fatalf("set no-op %v %v\n%s", err, *puts, out)
 	}
 	out, _ = run(t, "set", "--json")
-	if !strings.Contains(out, `"band_steering": true`) {
+	if !strings.Contains(out, `"band_steering": true`) || !strings.Contains(out, `"thread": true`) || strings.Contains(out, "secret") {
 		t.Fatalf("set json\n%s", out)
 	}
 }
@@ -561,7 +600,7 @@ func TestMCPTools(t *testing.T) {
 		t.Fatalf("raw %s", out)
 	}
 	joined := strings.Join(*puts, "\n")
-	for _, w := range []string{`"nickname":"New"`, `"paused":true`, "delete:r1", `"enabled":false`, "reboot:e1", `"sqm":true`} {
+	for _, w := range []string{`"nickname":"New"`, `"paused":true`, "delete:r1", `"enabled":false`, "reboot:e1", "settings?sqm=true:"} {
 		if !strings.Contains(joined, w) {
 			t.Fatalf("missing %s in\n%s", w, joined)
 		}
