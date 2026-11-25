@@ -98,8 +98,8 @@ eerox device rename <device> <name>  # pause | unpause | block | unblock
 eerox rename-batch names.txt         # bulk rename from a file (--dry-run)
 eerox eeros                          # mesh nodes and health
 eerox network                        # WAN, ISP, DHCP, DNS, firmware, last speed test
-eerox dns [--set 10.0.0.2 --yes]     # show or pin the network resolvers
-eerox set [--wpa3 on --sqm on --yes] # toggle WPA3, SQM, band steering, UPnP, IPv6
+eerox dns [--set 10.0.0.2 --yes]     # show or pin the network resolvers (reboots the mesh)
+eerox set [--wpa3 on --sqm on --yes] # toggle WPA3, SQM, band steering, UPnP, IPv6, Thread (may reboot the mesh)
 eerox speedtest                      # run one from the gateway
 eerox profiles ; eerox profile pause Kids
 eerox profile assign Kids "Kids iPad"  # add/remove a device from a profile (unassign)
